@@ -547,7 +547,7 @@ def message_side(x: float, width: float) -> str:
 
 
 def extract_messages(blocks: list[TextBlock], max_messages: int = 12, input_top=None,
-                     image=None) -> list[Message]:
+                     image=None, chat_left=CHAT_PANE_X_MIN) -> list[Message]:
     """Extract using bubble surfaces when pixels are available (all live reads).
 
     The text-only path is retained for legacy OCR probes; it cannot establish
@@ -557,8 +557,8 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12, input_top=
         from calibrated_messages import extract
         top = 1 - TITLE_BAR_Y_MAX
         bottom = input_top if input_top is not None else 1 - INPUT_AREA_Y_MIN
-        return extract(image, blocks, (CHAT_PANE_X_MIN, top,
-                       1 - CHAT_PANE_X_MIN, bottom - top), max_messages)
+        return extract(image, blocks, (chat_left, top,
+                       1 - chat_left, bottom - top), max_messages)
     chat = [b for b in blocks
             if b.x >= CHAT_PANE_X_MIN
             and (INPUT_AREA_Y_MIN if input_top is None else 1.0 - input_top) < b.y < TITLE_BAR_Y_MAX
@@ -774,7 +774,8 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
     t_ocr = time.perf_counter()
 
     chat_title = extract_chat_title(blocks)
-    msgs = (extract_messages(blocks, max_messages=max_messages, input_top=input_top, image=image)
+    msgs = (extract_messages(blocks, max_messages=max_messages, input_top=input_top, image=image,
+                             chat_left=outline[0])
             if outline else [])
     timing = {"capture": (t_cap - t0) * 1000, "ocr": (t_ocr - t_cap) * 1000,
               "total": (t_ocr - t0) * 1000, "capture_path": capture_path}

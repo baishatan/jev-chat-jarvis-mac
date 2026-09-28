@@ -10,6 +10,7 @@ from test_calibration import canvas, block
 from calibration import Calibration
 import chat_context
 import perception
+import Quartz as Q
 from test_chat_context_requests import exercise_model_paths
 import test_settings as network
 
@@ -45,15 +46,15 @@ class RecognitionTests(unittest.TestCase):
         self.h.history_enabled = True
         self.h._show_boxes = True
 
-    def read(self, boxes, blocks, manual):
-        image = canvas(boxes)
+    def read(self, boxes, blocks, manual, image=None, pane_left=.32):
+        image = image if image is not None else canvas(boxes)
         win = perception.WindowInfo(1, 1, '微信', 0, 0, 600, 600)
-        calibration = Calibration(600, 600, 192, 60, 408, 450) if manual else None
+        calibration = Calibration(600, 600, pane_left*600, 60, (1-pane_left)*600, 450) if manual else None
         # Capture, OCR and input-boundary detection are external system boundaries.
         with patch.object(perception, 'find_wechat_window', return_value=win), \
              patch.object(perception, 'capture_window', return_value=True), \
              patch.object(perception, '_load_png_image', return_value=image), \
-             patch('input_region.input_outline', return_value=(.32, .85, .68, .14)), \
+             patch('input_region.input_outline', return_value=(pane_left, .85, 1-pane_left, .14)), \
              patch.object(perception, 'ocr_image', return_value=[block('测试群', 230, 20, 80), *blocks]):
             result = perception.read_conversation(calibration=calibration)
         self.assertEqual(result['chat_title'], '测试群')
@@ -286,6 +287,66 @@ class RecognitionTests(unittest.TestCase):
             self.assertEqual(restored[-1][0], '收到')
             self.assertIn('引用背景（丙，不是新发言）：后天交付', chat_context.context_text(restored,99,limit=1))
             self.assertNotIn('明天能来开会吗', chat_context.context_text(restored,99,limit=1))
+
+    def test_wide_sidebar_rounded_short_bubbles_and_ui_words_in_body(self):
+        ctx=Q.CGBitmapContextCreate(None,600,600,8,2400,Q.CGColorSpaceCreateDeviceRGB(),Q.kCGImageAlphaPremultipliedLast)
+        Q.CGContextSetRGBFillColor(ctx,.98,.98,.98,1)
+        Q.CGContextFillRect(ctx,Q.CGRectMake(0,0,600,600))
+        Q.CGContextSetRGBFillColor(ctx,.91,.91,.92,1)
+        Q.CGContextFillRect(ctx,Q.CGRectMake(0,0,252,600))
+        for x,y,w,h in [(300,140,230,36),(300,240,50,36)]:
+            rounded=Q.CGPathCreateWithRoundedRect(Q.CGRectMake(x,600-y-h,w,h),7,7,None)
+            Q.CGContextAddPath(ctx,rounded); Q.CGContextFillPath(ctx)
+            Q.CGContextFillRect(ctx,Q.CGRectMake(x-5,600-y-15,5,5))
+        image=Q.CGBitmapContextCreateImage(ctx)
+        for manual in (False, True):
+            messages=self.read([], [block('请复制对方发送的文字',310,150,180),
+                                   block('好',310,250,16)], manual, image=image,pane_left=.42)
+            self.assertEqual([(m.text,m.side) for m in messages],
+                             [('请复制对方发送的文字','them'),('好','them')])
+            self.assertEqual(self.h._prejudge_req[0], '好')
+
+    def test_background_coloured_quote_with_only_vertical_rail(self):
+        boxes=[(232,130,200,36,(.93,.93,.94)), (234,180,2,20,(.85,.85,.86))]
+        for manual in (False, True):
+            # Vision may extend its text box a little beyond the physical rail.
+            for y,height in [(183,14),(180.5,20.6)]:
+                with self.subTest(manual=manual,y=y):
+                    blocks=[block('乙',242,105,16),block('可以',242,140,32),
+                            block('甲：请复制对方发送的文字',246,y,220,height)]
+                    messages=self.read(boxes, blocks, manual)
+                    self.assertEqual(len(messages),1)
+                    self.assertEqual(messages[0].text,'可以')
+                    self.assertEqual(messages[0].quote,'请复制对方发送的文字')
+                    self.assertEqual(messages[0].quote_sender,'甲')
+                    self.assertIn('引用背景（甲',self.h._active_context)
+                    self.h.clear_history('测试群')
+                    self.read(boxes,blocks[2:],manual)
+                    self.assertIsNone(self.h._prejudge_req)
+
+    def test_clipped_text_near_input_boundary_keeps_valid_body(self):
+        for manual in (False, True):
+            with self.subTest(manual=manual):
+                messages = self.read([(232,130,100,36,(.93,.93,.94))],
+                    [block('可以',242,140,32),
+                     block('边缘残字',242,508.5,32,2)], manual)
+                self.assertEqual([m.text for m in messages if m.side == 'them'], ['可以'])
+                self.assertEqual(self.h._prejudge_req[0], '可以')
+
+    def test_detached_quote_cannot_confirm_another_bubbles_side(self):
+        for manual in (False, True):
+            with self.subTest(manual=manual):
+                boxes = [(270,130,250,40,(.93,.93,.94))]
+                blocks = [block('归属未明的正文',280,140,180)]
+                for include_quote in (False, True):
+                    if include_quote:
+                        boxes.append((270,300,2,22,(.85,.85,.86)))
+                        blocks.append(block('甲：引用',282,302,60))
+                    messages = self.read(boxes, blocks, manual)
+                    self.assertEqual([(m.text,m.side) for m in messages],
+                                     [('归属未明的正文','unknown')])
+                    self.assertIsNone(self.h._prejudge_req)
+                    self.assertEqual(self.h.conversations.history('测试群'), [])
 
 
 if __name__ == '__main__':

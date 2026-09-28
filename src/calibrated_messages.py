@@ -5,10 +5,11 @@ to text. Nested neutral panels and detached quote rails supply quote boundaries.
 Unresolved ownership stays unknown; unverified media layouts are not interpreted.
 """
 from collections import deque
+from math import ceil, floor
 import re
 import numpy as np
 import Quartz
-from perception import Message, TextBlock, _is_noise
+from perception import Message, TextBlock, MIN_CONF
 
 Box = tuple[int, int, int, int]
 
@@ -92,14 +93,17 @@ def extract(image, blocks, rect, max_messages=12):
         # A nested quote can occupy most of a bubble. The outer padding still
         # forms a rectangle; check its border rather than requiring a solid fill.
         border = np.r_[mask[t, l:r], mask[bot-1, l:r], mask[t:bot, l], mask[t:bot, r-1]]
+        density = area/((r-l)*(bot-t))
         if (l > 0 and r < w and t > 0 and bot < h
-                and area/((r-l)*(bot-t)) >= .25 and np.mean(border) >= .75):
+                and (density >= .60 or (density >= .25 and np.mean(border) >= .75))):
             surface = ((l, t, r, bot), color)
             surfaces.append(surface)
             return surface
         return None
     for b in sorted(blocks, key=lambda b: 1-b.y-b.h):
-        if _is_noise(b): continue
+        # UI words such as “发送” may be genuine bubble/quote content. Region and
+        # surface ownership decide admission; never delete a body by substring.
+        if b.conf < MIN_CONF or not b.text.strip(): continue
         bx, by = b.x*W-x0, (1-b.y-b.h)*H-y0
         bw, bh = b.w*W, b.h*H
         if bx < 0 or by < 0 or bx+bw > w+1 or by+bh > h+1: continue
@@ -118,6 +122,36 @@ def extract(image, blocks, rect, max_messages=12):
         else:
             box, color = found
             groups.setdefault(box, ([], color))[0].append(b)
+
+    # Some WeChat quotes have no filled panel, just a neutral vertical rail on
+    # the pane background. Locate that rail independently of bubble surfaces.
+    rails: dict[Box, list[TextBlock]] = {}
+    for b in unresolved[:]:
+        bx, by, bh = b.x*W-x0, (1-b.y-b.h)*H-y0, b.h*H
+        sy = round(by+bh/2)
+        if not 0 <= sy < h: continue
+        for sx in range(max(0, round(bx-bh*1.8)), max(0, round(bx-3))):
+            color = crop[sy,sx]
+            contrast = np.max(np.abs(color-background))
+            if np.ptp(color) > 16 or not 8 <= contrast <= 120: continue
+            mask = np.max(np.abs(crop-color),axis=2) <= 3
+            found = component(mask,sx,sy,w*h*.02)
+            if found is None: continue
+            l,t,r,bot,area = found
+            if (r <= bx-3 and r-l <= max(3,bh*.25)
+                    and bh*.8 <= bot-t <= bh*6 and t <= by+bh*.2 and bot >= by+bh*.8):
+                rails.setdefault((l,t,r,bot),[]).append(b)
+                unresolved.remove(b)
+                break
+    bare_quotes = set()
+    for (l,t,r,bot), members in rails.items():
+        # The rail proves ownership; OCR's box may extend beyond it slightly.
+        top = min(t, min(floor((1-b.y-b.h)*H-y0) for b in members))
+        bottom = max(bot, max(ceil((1-b.y)*H-y0) for b in members))
+        right = max(ceil(b.x_right*W-x0) for b in members)
+        box = (l,top,right,bottom)
+        groups[box] = (members, background)
+        bare_quotes.add(box)
 
     # A quote-only OCR result may still sit inside a larger empty outer bubble.
     for (l,t,r,bot) in list(groups):
@@ -156,7 +190,7 @@ def extract(image, blocks, rect, max_messages=12):
 
     # A detached quote needs a structural quote rail. Small grey text alone can
     # also be a normal message, so it is insufficient to steal another bubble.
-    detached = set()
+    detached = set(bare_quotes)
     for box, (members, color) in groups.items():
         l,t,r,bot = box
         band = crop[t+3:bot-3, l+2:min(r, l+14)]
@@ -178,6 +212,7 @@ def extract(image, blocks, rect, max_messages=12):
     # anchors without being classified by their (potentially central) text centre.
     anchors: dict[str, list[int]] = {'them': [], 'me': []}
     for (l,t,r,bot), (members, color) in groups.items():
+        if (l,t,r,bot) in detached: continue
         near = min(max(b.h*H for b in members)*5, w*.30)
         if l < near and l*1.8 < w-r: anchors['them'].append(l)
         if w-r < near and (w-r)*1.8 < l: anchors['me'].append(r)
